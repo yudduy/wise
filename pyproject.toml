@@ -1,0 +1,10 @@
+[project]
+name = "wise"
+version = "0.1.0"
+description = "Paper-faithful scaffold for WISE causal memory, scheduling, exploration, and sparse-task evaluation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
