@@ -11,6 +11,8 @@ from wise.memory import (
     Task,
     image_entropy,
 )
+from wise.explore import GridMap, ProgressiveExplorer
+from wise.scheduler import OpportunisticTaskScheduler
 from wise.vlm import AsyncGraphBuilder, FixtureVLMClient
 
 
@@ -87,6 +89,67 @@ class VLMTests(unittest.TestCase):
         self.assertEqual(set(observation.entities), {"cow", "grass"})
         self.assertEqual(graph.causal_sources(Task("obtain beef", "beef")), {"cow"})
         self.assertIn("grass", graph.out_edges[("cow", CO_OCCURS_WITH)])
+
+
+class SchedulerTests(unittest.TestCase):
+    def test_scheduler_reorders_order_free_opportunity(self):
+        memory = ShortTermGeometricMemory()
+        graph = CausalEventGraph()
+        observation = Observation("cow-1", Pose(3, z=4), embedding=(1.0, 0.0), entities=("cow",))
+        memory.add(observation)
+        graph.add_observation(observation)
+        graph.add_edge("cow", CAN_OBTAIN, "beef")
+        tasks = [
+            Task("find water", "water", urgency=0.1, embedding=(0.0, 1.0)),
+            Task("collect logs", "logs", urgency=0.1, embedding=(0.0, 1.0)),
+            Task("obtain beef", "beef", urgency=0.1, embedding=(0.0, 1.0)),
+        ]
+
+        order = OpportunisticTaskScheduler().reorder(tasks, memory, graph, Pose(0, z=0))
+
+        self.assertEqual(order[0].name, "obtain beef")
+
+    def test_scheduler_does_not_violate_dependencies(self):
+        memory = ShortTermGeometricMemory()
+        graph = CausalEventGraph()
+        observation = Observation("cow-1", Pose(3, z=4), embedding=(1.0, 0.0), entities=("cow",))
+        memory.add(observation)
+        graph.add_observation(observation)
+        graph.add_edge("cow", CAN_OBTAIN, "beef")
+        tasks = [
+            Task("find water", "water", urgency=0.1),
+            Task("obtain beef", "beef", dependencies=("logs",), urgency=0.1),
+            Task("collect logs", "logs", urgency=0.1),
+        ]
+
+        names = [
+            task.name for task in OpportunisticTaskScheduler().reorder(tasks, memory, graph, Pose(0, z=0), completed=())
+        ]
+
+        self.assertGreater(names.index("obtain beef"), names.index("collect logs"))
+
+
+class ExplorationTests(unittest.TestCase):
+    def test_progressive_explorer_increases_coverage_without_revisiting(self):
+        grid = GridMap(8, 8)
+        grid.mark_visited((0, 0))
+        explorer = ProgressiveExplorer(grid)
+        before = grid.coverage
+        targets = [explorer.step(target) for target in [(0, 0), (1, 0), (2, 0)]]
+
+        self.assertTrue(all(target is not None for target in targets))
+        self.assertGreater(grid.coverage, before)
+        self.assertEqual(len(grid.visited), 4)
+
+    def test_explorer_exposes_quadtree_frontier_and_voronoi_tiers(self):
+        grid = GridMap(4, 4)
+        grid.mark_visited((1, 1))
+        explorer = ProgressiveExplorer(grid, max_depth=2)
+
+        self.assertIsNotNone(explorer.quadtree_region((1, 1)))
+        self.assertIn(explorer.frontier_target((1, 1)), {(0, 1), (1, 0), (1, 2), (2, 1)})
+        self.assertIn(explorer.voronoi_target((1, 1)), grid.unvisited())
+        self.assertTrue(explorer.stagnated(4.9, 30.0))
 
 
 if __name__ == "__main__":
