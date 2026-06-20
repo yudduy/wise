@@ -31,3 +31,28 @@ uv run python -m wise.eval --task abc-sparse --episodes 50 --require-live
 
 The offline mode is a deterministic smoke path. It exercises the same module
 boundaries without pretending to reproduce Minecraft numbers.
+
+## Shape
+
+- `wise.memory`: PEM-style place/event memory, DP-means clusters, hybrid
+  keyframe selection, causal graph, and lambda-weighted retrieval.
+- `wise.vlm`: async graph-construction queue, offline fixture client, and
+  env-gated OpenAI client.
+- `wise.scheduler`: dependency-safe opportunistic task scoring with paper
+  weights.
+- `wise.explore`: quadtree, frontier, and Voronoi grid exploration scaffold.
+- `wise.eval`: ABA-Sparse / ABC-Sparse smoke runs and paper-target gates.
+
+## Live Requirements
+
+Live regression is intentionally blocked until these are explicit:
+
+- `WISE_MINEDOJO_READY=1`
+- `WISE_MINECLIP_CHECKPOINT=/path/to/checkpoint`
+- `WISE_VPT_NAV_CHECKPOINT=/path/to/checkpoint`
+- `OPENAI_API_KEY=...`
+- `WISE_OPENAI_MODEL=...`
+
+The scaffold does not fabricate the paper's 1534-entry grounding database; tests
+use a tiny fixture and the live path should load the real database when it is
+available.

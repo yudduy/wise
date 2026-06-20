@@ -12,6 +12,7 @@ from wise.memory import (
     image_entropy,
 )
 from wise.explore import GridMap, ProgressiveExplorer
+from wise.eval import ABC_SPARSE, ABA_SPARSE, PAPER_TARGETS, EpisodeResult, build_offline_report, missing_live_requirements, summarize
 from wise.scheduler import OpportunisticTaskScheduler
 from wise.vlm import AsyncGraphBuilder, FixtureVLMClient
 
@@ -150,6 +151,28 @@ class ExplorationTests(unittest.TestCase):
         self.assertIn(explorer.frontier_target((1, 1)), {(0, 1), (1, 0), (1, 2), (2, 1)})
         self.assertIn(explorer.voronoi_target((1, 1)), grid.unvisited())
         self.assertTrue(explorer.stagnated(4.9, 30.0))
+
+
+class EvalTests(unittest.TestCase):
+    def test_offline_report_exercises_aba_and_abc_without_claiming_regression(self):
+        report = build_offline_report()
+
+        self.assertEqual(report["mode"], "offline")
+        self.assertEqual(set(report["summary"]), {ABA_SPARSE, ABC_SPARSE})
+        self.assertEqual(report["summary"][ABC_SPARSE]["regression_gate"], "skipped_offline_fixture")
+        abc = [result for result in report["results"] if result["task"] == ABC_SPARSE][0]
+        self.assertEqual(abc["details"]["order"][0], "obtain beef")
+
+    def test_live_target_comparison_uses_paper_numbers(self):
+        good = [EpisodeResult(ABC_SPARSE, True, 4500, {}) for _ in range(50)]
+        bad = [EpisodeResult(ABC_SPARSE, index < 10, 9000, {}) for index in range(50)]
+
+        self.assertTrue(summarize(good, PAPER_TARGETS[ABC_SPARSE], mode="live")["regression_gate"])
+        self.assertFalse(summarize(bad, PAPER_TARGETS[ABC_SPARSE], mode="live")["regression_gate"])
+
+    def test_live_requirements_name_missing_assets(self):
+        self.assertIn("WISE_MINEDOJO_READY", missing_live_requirements({}))
+        self.assertIn("WISE_MINECLIP_CHECKPOINT", missing_live_requirements({}))
 
 
 if __name__ == "__main__":
