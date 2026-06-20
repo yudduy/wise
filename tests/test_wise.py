@@ -1,7 +1,9 @@
 import unittest
+import asyncio
 
 from wise.memory import (
     CAN_OBTAIN,
+    CO_OCCURS_WITH,
     CausalEventGraph,
     Observation,
     Pose,
@@ -9,6 +11,7 @@ from wise.memory import (
     Task,
     image_entropy,
 )
+from wise.vlm import AsyncGraphBuilder, FixtureVLMClient
 
 
 class PackageSmokeTests(unittest.TestCase):
@@ -63,6 +66,27 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(hits[0].visual_score, 0.0)
         self.assertEqual(hits[0].causal_score, 1.0)
         self.assertEqual(hits[0].reason, "cow CAN_OBTAIN beef")
+
+
+class VLMTests(unittest.TestCase):
+    def test_async_fixture_builder_updates_entities_causal_edges_and_cooccurrence(self):
+        graph = CausalEventGraph()
+        observation = Observation("obs-1", Pose(2, z=3), frame="cow-frame", t=7)
+        client = FixtureVLMClient(
+            {
+                "cow-frame": {
+                    "entities": ["cow", "grass"],
+                    "causal_edges": [("cow", CAN_OBTAIN, "beef")],
+                    "co_occurs": [("cow", "grass")],
+                }
+            }
+        )
+
+        asyncio.run(AsyncGraphBuilder(graph, client).process([observation]))
+
+        self.assertEqual(set(observation.entities), {"cow", "grass"})
+        self.assertEqual(graph.causal_sources(Task("obtain beef", "beef")), {"cow"})
+        self.assertIn("grass", graph.out_edges[("cow", CO_OCCURS_WITH)])
 
 
 if __name__ == "__main__":
