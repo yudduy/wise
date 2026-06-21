@@ -1,5 +1,7 @@
 import unittest
 import asyncio
+import tempfile
+from pathlib import Path
 
 from wise.memory import (
     CAN_OBTAIN,
@@ -11,10 +13,16 @@ from wise.memory import (
     Task,
     image_entropy,
 )
+from wise.embedding import FixtureEmbedder, MineCLIPEmbedder, add_embedded_observation
 from wise.explore import GridMap, ProgressiveExplorer
-from wise.eval import ABC_SPARSE, ABA_SPARSE, PAPER_TARGETS, EpisodeResult, build_offline_report, missing_live_requirements, summarize
+from wise.eval import ABC_SPARSE, ABA_SPARSE, NO_SCHEDULER, PAPER_TARGETS, EpisodeResult, build_offline_report, missing_live_requirements, summarize
+from wise.mrsteve import mrsteve_smoke, stats_command, steve1_smoke
+from wise.observation import adapt_minedojo_observation
+from wise.provision import plan as provision_plan, write_env
+from wise.readiness import check as readiness_check
 from wise.scheduler import OpportunisticTaskScheduler
-from wise.vlm import AsyncGraphBuilder, FixtureVLMClient
+from wise.tasks import SPARSE_TASKS, selected_seeds, task_spec
+from wise.vlm import AsyncGraphBuilder, CachedVLMClient, FixtureVLMClient, GraphUpdate, JsonlGraphCache
 
 
 class PackageSmokeTests(unittest.TestCase):
@@ -90,6 +98,27 @@ class VLMTests(unittest.TestCase):
         self.assertEqual(set(observation.entities), {"cow", "grass"})
         self.assertEqual(graph.causal_sources(Task("obtain beef", "beef")), {"cow"})
         self.assertIn("grass", graph.out_edges[("cow", CO_OCCURS_WITH)])
+
+    def test_cached_vlm_client_reuses_jsonl_graph_update(self):
+        class CountingClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def analyze(self, observation):
+                self.calls += 1
+                return GraphUpdate(entities=("cow",), causal_edges=(("cow", CAN_OBTAIN, "beef"),))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = CountingClient()
+            cache = JsonlGraphCache(Path(tmp) / "graph.jsonl")
+            cached = CachedVLMClient(client, cache, prompt_version="p1", model="fixture")
+            observation = Observation("obs", Pose(0), frame="frame")
+
+            first = asyncio.run(cached.analyze(observation))
+            second = asyncio.run(cached.analyze(observation))
+
+        self.assertEqual(first, second)
+        self.assertEqual(client.calls, 1)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -171,8 +200,149 @@ class EvalTests(unittest.TestCase):
         self.assertFalse(summarize(bad, PAPER_TARGETS[ABC_SPARSE], mode="live")["regression_gate"])
 
     def test_live_requirements_name_missing_assets(self):
-        self.assertIn("WISE_MINEDOJO_READY", missing_live_requirements({}))
+        self.assertIn("WISE_MRSTEVE_ROOT", missing_live_requirements({}))
         self.assertIn("WISE_MINECLIP_CHECKPOINT", missing_live_requirements({}))
+
+    def test_offline_report_respects_episode_count_and_seeds(self):
+        report = build_offline_report([ABC_SPARSE], episodes=5)
+
+        self.assertEqual(report["summary"][ABC_SPARSE]["episodes"], 5)
+        self.assertEqual([result["details"]["seed"] for result in report["results"]], [0, 1, 2, 3, 4])
+
+    def test_offline_ablation_reports_failures_and_gpt_calls(self):
+        report = build_offline_report([ABC_SPARSE], episodes=1, variant=NO_SCHEDULER)
+
+        self.assertEqual(report["variant"], NO_SCHEDULER)
+        self.assertFalse(report["results"][0]["success"])
+        self.assertEqual(report["summary"][ABC_SPARSE]["failures"], ["offline_ablation_failed"])
+        self.assertEqual(report["summary"][ABC_SPARSE]["gpt_calls"], 1)
+
+
+class SparseTaskTests(unittest.TestCase):
+    def test_sparse_task_specs_encode_success_and_timeout(self):
+        spec = task_spec(ABC_SPARSE)
+
+        self.assertEqual(spec, SPARSE_TASKS[ABC_SPARSE])
+        self.assertTrue(spec.succeeded({"beef": 1}))
+        self.assertFalse(spec.succeeded({"beef": 0}))
+        self.assertTrue(spec.timed_out(spec.timeout_steps))
+        self.assertEqual(selected_seeds(ABC_SPARSE, 3), (0, 1, 2))
+
+
+class ReadinessTests(unittest.TestCase):
+    def test_readiness_passes_with_expected_files_and_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "MrSteve"
+            for rel in ("config/main.yaml", "scripts/get_stats.py"):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+            for rel in ("main.py", "prepare_models.sh", "task_specs.yaml"):
+                (root / rel).write_text("", encoding="utf-8")
+            files = {}
+            for name in ("mineclip.ckpt", "steve1.weights", "2x.model", "vpt_nav.weights"):
+                path = Path(tmp) / name
+                path.write_text("", encoding="utf-8")
+                files[name] = str(path)
+
+            report = readiness_check(
+                {
+                    "OPENAI_API_KEY": "test",
+                    "WISE_OPENAI_MODEL": "gpt-4o-test",
+                    "WISE_MRSTEVE_ROOT": str(root),
+                    "WISE_MINECLIP_CHECKPOINT": files["mineclip.ckpt"],
+                    "WISE_STEVE1_WEIGHTS": files["steve1.weights"],
+                    "WISE_VPT_MODEL": files["2x.model"],
+                    "WISE_VPT_NAV_CHECKPOINT": files["vpt_nav.weights"],
+                }
+            )
+
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["next_step"], "run one MrSteve/Steve-1 episode")
+
+
+class MrSteveCommandTests(unittest.TestCase):
+    def test_steve1_and_mrsteve_smoke_commands(self):
+        self.assertEqual(
+            steve1_smoke("/repo").argv,
+            (
+                "uv",
+                "run",
+                "main.py",
+                "task=log_water_bucket_aba_randinit",
+                "agent=steve1",
+                "n_episodes=1",
+            ),
+        )
+        self.assertEqual(mrsteve_smoke("/repo").argv[4], "agent=mrsteve")
+
+    def test_stats_command_uses_mrsteve_stats_script(self):
+        self.assertEqual(
+            stats_command("/repo", "outputs/task/agent/*").argv,
+            ("uv", "run", "scripts/get_stats.py", "outputs/task/agent/*"),
+        )
+
+
+class ProvisionTests(unittest.TestCase):
+    def test_provision_plan_names_clone_setup_and_smoke_commands(self):
+        planned = provision_plan("/repo/MrSteve")
+
+        self.assertEqual(planned["clone"], "git clone https://github.com/frechele/MrSteve /repo/MrSteve")
+        self.assertIn("uv run bash prepare_models.sh", planned["setup"])
+        self.assertIn("agent=steve1", planned["smoke"][0])
+        self.assertIn("agent=mrsteve", planned["smoke"][1])
+
+    def test_write_env_refuses_to_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env.wise"
+            write_env(env_path, "/repo/MrSteve")
+
+            self.assertIn("WISE_MRSTEVE_ROOT=/repo/MrSteve", env_path.read_text(encoding="utf-8"))
+            with self.assertRaises(FileExistsError):
+                write_env(env_path, "/other")
+
+
+class ObservationAdapterTests(unittest.TestCase):
+    def test_minedojo_dict_adapts_to_wise_observation_without_inventory_leak(self):
+        adapted = adapt_minedojo_observation(
+            {
+                "rgb": "frame-token",
+                "location_stats": {"x": 1, "y": 64, "z": -3, "yaw": 90, "pitch": 10},
+                "nearby_entities": [{"name": "cow"}, {"type": "oak_log"}, "water"],
+                "inventory": {"beef": 0},
+            },
+            observation_id="obs-7",
+            timestep=42,
+            embedding=(0.1, 0.2),
+        )
+
+        self.assertEqual(adapted.observation.id, "obs-7")
+        self.assertEqual(adapted.observation.frame, "frame-token")
+        self.assertEqual(adapted.observation.pose.x, 1.0)
+        self.assertEqual(adapted.observation.pose.yaw, 90.0)
+        self.assertEqual(adapted.observation.entities, ("cow", "oak_log", "water"))
+        self.assertEqual(adapted.observation.embedding, (0.1, 0.2))
+        self.assertEqual(adapted.evaluator_state, {"inventory": {"beef": 0}})
+
+
+class EmbeddingTests(unittest.TestCase):
+    def test_fixture_embedder_wires_observation_into_memory(self):
+        memory = ShortTermGeometricMemory()
+        observation = Observation("obs", Pose(0), frame="frame-a")
+
+        add_embedded_observation(memory, observation, FixtureEmbedder({"frame-a": (0.3, 0.7)}))
+
+        self.assertEqual(observation.embedding, (0.3, 0.7))
+        self.assertIn("obs", memory.observations)
+
+    def test_mineclip_placeholder_validates_checkpoint_and_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "mineclip.ckpt"
+            checkpoint.write_text("", encoding="utf-8")
+            embedder = MineCLIPEmbedder(checkpoint)
+
+            with self.assertRaisesRegex(RuntimeError, "MineCLIP runtime is not wired"):
+                embedder.embed("frame")
 
 
 if __name__ == "__main__":

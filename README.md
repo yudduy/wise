@@ -12,6 +12,7 @@ code, so this repo reimplements from the arXiv v1 method and appendix.
 
 ```bash
 uv run python -m unittest
+uv run python -m wise.readiness
 uv run python -m wise.eval --offline
 ```
 
@@ -41,14 +42,20 @@ boundaries without pretending to reproduce Minecraft numbers.
 - `wise.scheduler`: dependency-safe opportunistic task scoring with paper
   weights.
 - `wise.explore`: quadtree, frontier, and Voronoi grid exploration scaffold.
-- `wise.eval`: ABA-Sparse / ABC-Sparse smoke runs and paper-target gates.
+- `wise.mrsteve`: external MrSteve command construction for smoke runs.
+- `wise.observation` and `wise.embedding`: MineDojo observation and MineCLIP
+  embedding boundaries.
+- `wise.readiness` and `wise.eval`: live asset checks, ABA/ABC smoke runs, and
+  paper-target gates.
 
 ## Live Requirements
 
 Live regression is intentionally blocked until these are explicit:
 
-- `WISE_MINEDOJO_READY=1`
+- `WISE_MRSTEVE_ROOT=/path/to/MrSteve`
 - `WISE_MINECLIP_CHECKPOINT=/path/to/checkpoint`
+- `WISE_STEVE1_WEIGHTS=/path/to/checkpoint`
+- `WISE_VPT_MODEL=/path/to/2x.model`
 - `WISE_VPT_NAV_CHECKPOINT=/path/to/checkpoint`
 - `OPENAI_API_KEY=...`
 - `WISE_OPENAI_MODEL=...`

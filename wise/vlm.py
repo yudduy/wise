@@ -7,6 +7,7 @@ import json
 import os
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
 from .memory import CAN_OBTAIN, CO_OCCURS_WITH, CausalEventGraph, Observation
@@ -19,6 +20,10 @@ class GraphUpdate:
     co_occurs: tuple[tuple[str, str], ...] = ()
     node_types: Mapping[str, str] | None = None
 
+    def __post_init__(self) -> None:
+        if self.node_types is None:
+            object.__setattr__(self, "node_types", {})
+
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "GraphUpdate":
         return cls(
@@ -27,6 +32,14 @@ class GraphUpdate:
             co_occurs=tuple(_pair(pair) for pair in value.get("co_occurs", ())),
             node_types={str(k): str(v) for k, v in dict(value.get("node_types", {})).items()},
         )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "entities": list(self.entities),
+            "causal_edges": [list(edge) for edge in self.causal_edges],
+            "co_occurs": [list(pair) for pair in self.co_occurs],
+            "node_types": dict(self.node_types or {}),
+        }
 
 
 class VLMClient(Protocol):
@@ -44,6 +57,65 @@ class FixtureVLMClient:
             return GraphUpdate.from_mapping(self.fixtures[str(fixture_key)])
         except KeyError as error:
             raise KeyError(f"missing VLM fixture for {fixture_key!r}") from error
+
+
+class JsonlGraphCache:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def get(self, key: str) -> GraphUpdate | None:
+        if not self.path.exists():
+            return None
+        with self.path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get("key") == key:
+                    return GraphUpdate.from_mapping(record["parsed_update"])
+        return None
+
+    def put(self, key: str, observation: Observation, update: GraphUpdate, *, prompt_version: str, model: str, raw_response: object = None) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "key": key,
+            "observation_id": observation.id,
+            "frame_id": observation.frame if isinstance(observation.frame, str) else observation.id,
+            "prompt_version": prompt_version,
+            "model": model,
+            "raw_response": raw_response,
+            "parsed_update": update.to_mapping(),
+        }
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+class CachedVLMClient:
+    def __init__(
+        self,
+        client: VLMClient,
+        cache: JsonlGraphCache,
+        *,
+        prompt_version: str = "wise-v1",
+        model: str = "fixture",
+    ):
+        self.client = client
+        self.cache = cache
+        self.prompt_version = prompt_version
+        self.model = model
+
+    async def analyze(self, observation: Observation) -> GraphUpdate:
+        cache_key = self.key(observation)
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+        update = await self.client.analyze(observation)
+        self.cache.put(cache_key, observation, update, prompt_version=self.prompt_version, model=self.model)
+        return update
+
+    def key(self, observation: Observation) -> str:
+        frame_id = observation.frame if isinstance(observation.frame, str) else observation.id
+        return f"{self.prompt_version}:{self.model}:{observation.id}:{frame_id}"
 
 
 class OpenAIVLMClient:
